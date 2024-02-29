@@ -1,4 +1,8 @@
-# Welcome to the FamiStudio GitHub page
+# Welcome to the Shivion/FamiStudio GitHub page
+This is a moderately modified version of FamiStudio for my ease of use.
+For now the only addition is the ability to right click a piano key to highlight all notes in key of that note.
+
+# ORIGINAL README
 This is the GitHub page of FamiStudio, which is intended for people wanting to view/download the source code or report bug fixes.
 
 **If you are simply interested in installing FamiStudio, please visit [famistudio.org](https://famistudio.org/) or [itch.io](https://bleubleu.itch.io/famistudio).**
