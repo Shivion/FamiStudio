@@ -1,4 +1,4 @@
-# Welcome to the Shivion/FamiStudio GitHub page
+# Welcome to the Shivion/FamiStudioScrubs GitHub page
 This is a moderately modified version of FamiStudio for my ease of use.
 For now the only addition is the ability to right click a piano key to highlight all notes in key of that note.
 
