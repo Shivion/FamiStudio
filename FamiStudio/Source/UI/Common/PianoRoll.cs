@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 
 namespace FamiStudio
 {
@@ -62,6 +63,7 @@ namespace FamiStudio
         const int DefaultMinPixelDistForLines      = 5;
         const int DefaultGizmoSize                 = 20;
 
+        int currentKey = int.MinValue;
         int headerSizeY;
         int headerAndEffectSizeY;
         int effectPanelSizeY;
@@ -2550,6 +2552,17 @@ namespace FamiStudio
                     int y = octaveBaseY - j * noteSizeY;
                     if (!IsBlackKey(j))
                         r.b.FillRectangle(0, y - noteSizeY, maxX, y, Theme.DarkGreyColor4);
+                    if (IsInKey(j))
+                    {
+                        if (IsBlackKey(j))
+                        {
+                            r.b.FillRectangle(0, y - noteSizeY, maxX, y, Theme.Lighten(Theme.DarkGreyColor4,20));
+                        }
+                        else
+                        {
+                            r.b.FillRectangle(0, y - noteSizeY, maxX, y, Theme.Lighten(Theme.DarkGreyColor4,30));
+                        }
+                    }
                 }
             }
 
@@ -2924,6 +2937,11 @@ namespace FamiStudio
                     }
                 }
             }
+        }
+
+        private bool IsInKey(int j)
+        {
+            return j == currentKey - 11 || j == currentKey - 10  || j == currentKey - 8 || j == currentKey - 7 || j == currentKey - 5 || j == currentKey - 3 || j == currentKey - 1 || j == currentKey || j == currentKey + 2 || j == currentKey + 4 || j == currentKey + 5 || j == currentKey + 7 || j == currentKey + 9 || j == currentKey + 11;
         }
 
         private void RenderEnvelopeValues(RenderInfo r)
@@ -4258,6 +4276,19 @@ namespace FamiStudio
             }
         }
 
+        private void SelectKey(int x, int y)
+        {
+            int newKey = GetPianoNote(Utils.Clamp(x, 0, pianoSizeX - 1), y) % 12 - 1;
+            if (currentKey == newKey)
+            {
+                currentKey = int.MinValue;
+            }
+            else
+            {
+                currentKey = newKey;
+            }
+        }
+
         private void EditDPCMSampleMappingProperties(Point pt, DPCMSampleMapping mapping)
         {
             var strings = DPCMSampleRate.GetStringList(true, FamiStudio.StaticInstance.PalPlayback, true, true);
@@ -5488,6 +5519,11 @@ namespace FamiStudio
             if (e.Left && IsPointInPiano(e.X, e.Y))
             {
                 StartPlayPiano(e.X, e.Y);
+                return true;
+            }
+            else if (e.Right && IsPointInPiano(e.X, e.Y))
+            {
+                SelectKey(e.X, e.Y);
                 return true;
             }
 
