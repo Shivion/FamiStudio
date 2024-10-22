@@ -78,19 +78,19 @@ namespace FamiStudio
         {   //This is a mess, works somehow tho
             var project = song.Project.DeepClone();
             song = project.GetSong(song.Id);
-            var regPlayer = new RegisterPlayer(project.OutputsStereoAudio);
+            var regPlayer = new RegisterPlayer(project.PalMode, project.OutputsStereoAudio);
             int OGSongLength;
             int numDPCMBanks = (!project.UsesMultipleDPCMBanks &&
             project.GetPackedSampleData(0).Length <= 16384) ?
             1 : project.AutoAssignSamplesBanks(16384, out _);
             var sampleBanks = new Dictionary<int, int>();
             foreach (var sample in project.Samples) sampleBanks.Add(sample.Id, sample.Bank);
-            var writes = regPlayer.GetRegisterValues(song, project.PalMode, out OGSongLength);
+            var writes = regPlayer.GetRegisterValues(song, out OGSongLength);
             int TotalLength = 0, IntroLength = 0;
             if (smoothLoop)
             {
                 song.ExtendForLooping(2);
-                writes = regPlayer.GetRegisterValues(song, project.PalMode, out TotalLength);
+                writes = regPlayer.GetRegisterValues(song, out TotalLength);
             }
             bool loopsTwice = false;
             Debug.WriteLine("Writes got, length: " + writes.Length);
@@ -103,7 +103,7 @@ namespace FamiStudio
                 {
                     var IntroLengthSong = project.DeepClone().GetSong(song.Id);
                     IntroLengthSong.SetLength(IntroLengthSong.LoopPoint);
-                    regPlayer.GetRegisterValues(IntroLengthSong, project.PalMode, out IntroLength);
+                    regPlayer.GetRegisterValues(IntroLengthSong, out IntroLength);
                 }
                 if (smoothLoop)
                 {
@@ -203,7 +203,7 @@ namespace FamiStudio
                     DPCMDataList.AddRange(project.GetPackedSampleData(i).ToList());
                 }   
                 var sampleData = DPCMDataList.ToArray();
-                bool DPCMUsed = sampleData.Length != 0;
+                var DPCMUsed = sampleData.Length != 0;
                 var writer = new BinaryWriter(file);
                 var fileLength = sizeof(VgmHeader) + initSize + extraHeaderSize 
                 + 1 - 4 + (DPCMUsed ? (sampleData.Length + ( project.UsesMultipleDPCMBanks ? 7 + GetAmountOfBankswitching(sampleBanks, writes) * 12 : 9 )) : 0); 
@@ -398,15 +398,15 @@ namespace FamiStudio
                     }
                     else if (reg.Register == NesApu.APU_DMC_START)
                     {
-                        if (sampleBanks[reg.Metadata[0]] != DPCMBank && project.UsesMultipleDPCMBanks)
+                        if (sampleBanks[reg.Metadata] != DPCMBank && project.UsesMultipleDPCMBanks)
                         {
                             writer.Write(new byte[] { 0x68, 0x66, 0x07 });    //Transfer data block type NES APU RAM write
-                            writer.Write(Utils.IntToBytes24Bit(sampleBankPointers[sampleBanks[reg.Metadata[0]]]));
+                            writer.Write(Utils.IntToBytes24Bit(sampleBankPointers[sampleBanks[reg.Metadata]]));
                             writer.Write(new byte[] { 0x00, 0xC0, 0x00, 0x00, 0x40, 0x00 }); //Write 4000 bytes to address C000
                         }
-                        DPCMBank = sampleBanks[reg.Metadata[0]];
+                        DPCMBank = sampleBanks[reg.Metadata];
                         writer.Write(new byte[] { 0xB4, NesApu.APU_DMC_START & 0xFF });
-                        writer.Write((byte)(project.GetSampleBankOffset(project.GetSample(reg.Metadata[0])) >> 6));
+                        writer.Write((byte)(project.GetSampleBankOffset(project.GetSample(reg.Metadata)) >> 6));
                     }
                     else if ((reg.Register < 0x401c) || (reg.Register < 0x409f && reg.Register > 0x401F))   //2A03 & FDS
                     {
@@ -435,10 +435,10 @@ namespace FamiStudio
             int bankswitches = 0;
             foreach (var write in writes)
             {
-                if (write.Register == NesApu.APU_DMC_START && sampleBanks[write.Metadata[0]] != bankInUse)
+                if (write.Register == NesApu.APU_DMC_START && sampleBanks[write.Metadata] != bankInUse)
                 {
                     bankswitches++;
-                    bankInUse = sampleBanks[write.Metadata[0]];
+                    bankInUse = sampleBanks[write.Metadata];
                 }
             }
             return bankswitches;
@@ -448,24 +448,24 @@ namespace FamiStudio
         {
             //TODO: determine states at frames instead of comparing writes
             int pointer = 0;
-            while (writes[pointer++].FrameNumber != IntroLength) ;
+            while (writes[pointer].FrameNumber < IntroLength) pointer++;
             Debug.WriteLine(" === LoopOpt: Loop pointer " + pointer + " at frame " + writes[pointer].FrameNumber);
             int afterLoopPointer = pointer;
-            while (writes[afterLoopPointer++].FrameNumber != LoopFrame) ;
+            while (writes[afterLoopPointer].FrameNumber < LoopFrame) afterLoopPointer++;
             int finalLoopPointer = afterLoopPointer;
             Debug.WriteLine(" === LoopOpt: Second loop pointer " + afterLoopPointer + " at frame " + writes[afterLoopPointer].FrameNumber);
             int LoopLength = LoopFrame - IntroLength;   //reused a bunch of times
             int frame = IntroLength;
             for (; frame < LoopFrame; frame++)
             {
-                while (writes[afterLoopPointer++].FrameNumber < frame + LoopLength && afterLoopPointer < writes.Length) ;    //Pad afterLoopPointer 
-                while (writes[pointer++].FrameNumber < frame) ;  //To pad pointer 
+                while (writes[afterLoopPointer].FrameNumber < frame + LoopLength && afterLoopPointer < writes.Length) afterLoopPointer++;    //Pad afterLoopPointer 
+                while (writes[pointer].FrameNumber < frame) pointer++;  //Pad pointer 
                 for (; afterLoopPointer < writes.Length && writes[pointer].FrameNumber <= frame && writes[afterLoopPointer].FrameNumber <= frame + LoopFrame; pointer++, afterLoopPointer++)
                 {
                     if (!(writes[pointer].Register == writes[afterLoopPointer].Register &&
                     writes[pointer].Value == writes[afterLoopPointer].Value &&
                     ((writes[pointer].Register == NesApu.APU_DMC_START &&
-                    writes[pointer].Metadata[0] == writes[afterLoopPointer].Metadata[0]) ||
+                    writes[pointer].Metadata == writes[afterLoopPointer].Metadata) ||
                     writes[pointer].Register != NesApu.APU_DMC_START)))
                     {
                         Debug.WriteLine($"Dumbass broke at frame {writes[pointer].FrameNumber} at pointer {pointer}/{afterLoopPointer} because \'{writes[pointer].Value:x2} => ${writes[pointer].Register:x4}\' isn't equal to \'{writes[afterLoopPointer].Value:x2} => ${writes[afterLoopPointer].Register:x4}\'");
@@ -491,10 +491,12 @@ namespace FamiStudio
         int[] epsmRegisterLo = new int[0xff];
         int[] epsmRegisterHi = new int[0xff];
         int[] epsmFmTrigger = new int[0x6];
+        int[] epsmEnvTrigger = new int[0x3];
         int[] epsmFmEnabled = new int[0x6];
         int[] epsmFmKey = new int[0x6];
         int[] epsmFmRegisterOrder = new[] { 0xB0, 0xB4, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0x38, 0x48, 0x58, 0x68, 0x78, 0x88, 0x98, 0x34, 0x44, 0x54, 0x64, 0x74, 0x84, 0x94, 0x3c, 0x4c, 0x5c, 0x6c, 0x7c, 0x8c, 0x9c, 0x22 };
         int[] s5bRegister = new int[0xff];
+        int[] s5bEnvTrigger = new int[0x3];
         bool dpcmTrigger = false;
         byte[] dpcmData = new byte[0xffff];
         byte[] pcmRAMData = new byte[0xffffff];
@@ -518,6 +520,9 @@ namespace FamiStudio
 
             public int fdsModDepth = 0;
             public int fdsModSpeed = 0;
+
+            public int s5bEnvFreq = 0;
+            public int epsmEnvFreq = 0;
 
             public bool fmTrigger = false;
             public bool fmSustain = false;
@@ -543,13 +548,6 @@ namespace FamiStudio
             finePitch = period - noteTable[bestNote];
 
             return bestNote;
-        }
-
-        private Pattern GetOrCreatePattern(Channel channel, int patternIdx)
-        {
-            if (channel.PatternInstances[patternIdx] == null)
-                channel.PatternInstances[patternIdx] = channel.CreatePattern();
-            return channel.PatternInstances[patternIdx];
         }
 
         private Instrument GetDutyInstrument(Channel channel, int duty)
@@ -645,22 +643,43 @@ namespace FamiStudio
             }
         }
 
-        private Instrument GetS5BInstrument(int noise, int mixer)
+        private Instrument GetS5BInstrument(int noise, int mixer, bool envEnabled, int envShape)
         {
+            if (envEnabled)
+            {
+                if (envShape < 0x4) envShape = 0x9;
+                else
+                if (envShape < 0x8) envShape = 0xf;
+
+                envShape -= 7;
+            }
+            else
+            {
+                envShape = 0;
+            }
+
+            var toneEnabled = (mixer & 1) == 0;
+            var noiseEnabled = (mixer & 2) == 0;
+
             var name = "S5B";
-            if (mixer != 2 && noise == 0)
-                noise = 1;
-            if (mixer != 2)
-                name = $"S5B Noise {noise} M {mixer}";
+            if (toneEnabled)
+                name += $" Tone";
+            if (noiseEnabled)
+                name += $" Noise {noise}";
+            if (envShape != 0)
+                name += $" Env {envShape + 7:X1}";
 
             var instrument = project.GetInstrument(name);
             if (instrument == null)
             {
                 instrument = project.CreateInstrument(ExpansionType.S5B, name);
-                instrument.Envelopes[EnvelopeType.YMNoiseFreq].Length = 1;
-                instrument.Envelopes[EnvelopeType.YMNoiseFreq].Values[0] = (sbyte)noise;
-                instrument.Envelopes[EnvelopeType.YMMixerSettings].Length = 1;
-                instrument.Envelopes[EnvelopeType.YMMixerSettings].Values[0] = (sbyte)mixer;
+                instrument.S5BEnvAutoPitch = false;
+                instrument.S5BEnvelopeShape = (byte)envShape;
+                instrument.EpsmPatch = 1;
+                instrument.Envelopes[EnvelopeType.S5BNoiseFreq].Length = 1;
+                instrument.Envelopes[EnvelopeType.S5BNoiseFreq].Values[0] = (sbyte)noise;
+                instrument.Envelopes[EnvelopeType.S5BMixer].Length = 1;
+                instrument.Envelopes[EnvelopeType.S5BMixer].Values[0] = (sbyte)mixer;
             }
 
             return instrument;
@@ -687,7 +706,7 @@ namespace FamiStudio
             }
         }
 
-        private Instrument GetEPSMInstrument(byte chanType, byte[] patchRegs, int noise, int mixer)
+        private Instrument GetEPSMInstrument(byte chanType, byte[] patchRegs, int noise, int mixer, bool envEnabled, int envShape)
         {
             var name = $"EPSM {Instrument.GetEpsmPatchName(1)}";
             var instrument = project.GetInstrument(name);
@@ -703,22 +722,45 @@ namespace FamiStudio
 
             if (chanType == 0)
             {
-                if (mixer != 2 && noise == 0)
+                if (envEnabled)
+                {
+                    if (envShape < 0x4) envShape = 0x9;
+                    else
+                    if (envShape < 0x8) envShape = 0xf;
+
+                    envShape -= 7;
+                }
+                else
+                {
+                    envShape = 0;
+                }
+
+                var toneEnabled = (mixer & 1) == 0;
+                var noiseEnabled = (mixer & 2) == 0;
+
+                name = "EPSM";
+                if (noiseEnabled && noise == 0)
                     noise = 1;
-                if (mixer != 2)
-                    name = $"EPSM Noise {noise} M {mixer}";
+                if (toneEnabled)
+                    name += $" Tone";
+                if (noiseEnabled)
+                    name += $" Noise {noise}";
+                if (envShape != 0)
+                    name += $" Env {envShape + 7:X1}";
 
                 instrument = project.GetInstrument(name);
                 if (instrument == null)
                 {
                     instrument = project.CreateInstrument(ExpansionType.EPSM, name);
-
+                    instrument.EPSMSquareEnvAutoPitch = false;
+                    instrument.EPSMSquareEnvelopeShape = (byte)envShape;
                     instrument.EpsmPatch = 1;
-                    instrument.Envelopes[EnvelopeType.YMNoiseFreq].Length = 1;
-                    instrument.Envelopes[EnvelopeType.YMNoiseFreq].Values[0] = (sbyte)noise;
-                    instrument.Envelopes[EnvelopeType.YMMixerSettings].Length = 1;
-                    instrument.Envelopes[EnvelopeType.YMMixerSettings].Values[0] = (sbyte)mixer;
+                    instrument.Envelopes[EnvelopeType.S5BNoiseFreq].Length = 1;
+                    instrument.Envelopes[EnvelopeType.S5BNoiseFreq].Values[0] = (sbyte)noise;
+                    instrument.Envelopes[EnvelopeType.S5BMixer].Length = 1;
+                    instrument.Envelopes[EnvelopeType.S5BMixer].Values[0] = (sbyte)mixer;
                 }
+
                 return instrument;
             }
 
@@ -735,6 +777,15 @@ namespace FamiStudio
                     instrument.EpsmPatchRegs[1] = patchRegs[1];
                 }
                 return instrument;
+            }
+
+            if (instrument == null)
+            {
+                instrument = project.CreateInstrument(ExpansionType.EPSM, name);
+
+                instrument.EpsmPatch = 1;
+                if (instrument.EpsmPatchRegs.SequenceEqual(patchRegs))
+                    return instrument;
             }
 
             foreach (var inst in project.Instruments)
@@ -756,11 +807,6 @@ namespace FamiStudio
                     Array.Copy(patchRegs, instrument.EpsmPatchRegs, 31);
                     return instrument;
                 }
-            }
-            foreach (var inst in project.Instruments)
-            {
-                if (inst.IsEpsm)
-                    return inst;
             }
         }
 
@@ -919,9 +965,16 @@ namespace FamiStudio
                         switch (state)
                         {
                             case NotSoFatso.STATE_PERIOD: return s5bRegister[0 + idx * 2] | (s5bRegister[1 + idx * 2] << 8);
-                            case NotSoFatso.STATE_VOLUME: return (((s5bRegister[7] >> idx) & 9) != 9) ? s5bRegister[8 + idx] : 0;
-                            case NotSoFatso.STATE_YMMIXER: return ((s5bRegister[7] >> idx) & 9);
-                            case NotSoFatso.STATE_YMNOISEFREQUENCY: return s5bRegister[6];
+                            case NotSoFatso.STATE_VOLUME: return (((s5bRegister[7] >> idx) & 9) != 9) || ((s5bRegister[0x8 + idx] & 0x10) != 0) ? s5bRegister[8 + idx] : 0;
+                            case NotSoFatso.STATE_S5BMIXER: return ((s5bRegister[7] >> idx) & 9);
+                            case NotSoFatso.STATE_S5BNOISEFREQUENCY: return s5bRegister[6];
+                            case NotSoFatso.STATE_S5BENVFREQUENCY: return s5bRegister[0xB] | (s5bRegister[0xC] << 8);
+                            case NotSoFatso.STATE_S5BENVSHAPE: return s5bRegister[0xD] & 0xF;
+                            case NotSoFatso.STATE_S5BENVTRIGGER:
+                                int trigger = s5bEnvTrigger[idx];
+                                s5bEnvTrigger[idx] = 0;
+                                return trigger;
+                            case NotSoFatso.STATE_S5BENVENABLED: return (s5bRegister[0x8 + idx] & 0x10);
                         }
                         break;
                     }
@@ -953,9 +1006,16 @@ namespace FamiStudio
                         switch (state)
                         {
                             case NotSoFatso.STATE_PERIOD: return epsmRegisterLo[0 + idx*2] | (epsmRegisterLo[1 + idx * 2] << 8);
-                            case NotSoFatso.STATE_VOLUME: return (((epsmRegisterLo[7] >> idx) & 9 ) != 9)  ? epsmRegisterLo[8 + idx] : 0;
-                            case NotSoFatso.STATE_YMMIXER: return ((epsmRegisterLo[7] >> idx) & 9);
-                            case NotSoFatso.STATE_YMNOISEFREQUENCY: return epsmRegisterLo[6];
+                            case NotSoFatso.STATE_VOLUME: return (((epsmRegisterLo[7] >> idx) & 9 ) != 9) || ((epsmRegisterLo[0x8 + idx] & 0x10) != 0) ? epsmRegisterLo[8 + idx] : 0;
+                            case NotSoFatso.STATE_S5BMIXER: return ((epsmRegisterLo[7] >> idx) & 9);
+                            case NotSoFatso.STATE_S5BNOISEFREQUENCY: return epsmRegisterLo[6];
+                            case NotSoFatso.STATE_S5BENVFREQUENCY: return epsmRegisterLo[0xB] | (epsmRegisterLo[0xC] << 8);
+                            case NotSoFatso.STATE_S5BENVSHAPE: return epsmRegisterLo[0xD] & 0xF;
+                            case NotSoFatso.STATE_S5BENVTRIGGER:
+                                int trigger = epsmEnvTrigger[idx];
+                                epsmEnvTrigger[idx] = 0;
+                                return trigger;
+                            case NotSoFatso.STATE_S5BENVENABLED: return (epsmRegisterLo[0x8 + idx] & 0x10);
                         }
                         break;
                     }
@@ -1095,7 +1155,7 @@ namespace FamiStudio
 
                     if (Note.IsMusicalNote(noteValue))
                     {
-                        var note = GetOrCreatePattern(channel, p).GetOrCreateNoteAt(n);
+                        var note = channel.GetOrCreatePattern(p).GetOrCreateNoteAt(n);
                         note.Value = (byte)noteValue;
                         note.Instrument = dpcmInst;
                         if (state.dmc != dmc)
@@ -1109,13 +1169,13 @@ namespace FamiStudio
                 }
                 else if (dmc != state.dmc)
                 {
-                    GetOrCreatePattern(channel, p).GetOrCreateNoteAt(n).DeltaCounter = (byte)dmc;
+                    channel.GetOrCreatePattern(p).GetOrCreateNoteAt(n).DeltaCounter = (byte)dmc;
                     state.dmc = dmc;
                 }
 
                 if (dmcActive == 0 && state.state == ChannelState.Triggered)
                 {
-                    GetOrCreatePattern(channel, p).GetOrCreateNoteAt(n).IsStop = true;
+                    channel.GetOrCreatePattern(p).GetOrCreateNoteAt(n).IsStop = true;
                     state.state = ChannelState.Stopped;
                 }
             }
@@ -1219,7 +1279,7 @@ namespace FamiStudio
                 {
                     if (state.volume != volume && (volume != 0 || hasTrigger))
                     {
-                        var pattern = GetOrCreatePattern(channel, p).GetOrCreateNoteAt(n).Volume = (byte)volume;
+                        var pattern = channel.GetOrCreatePattern(p).GetOrCreateNoteAt(n).Volume = (byte)volume;
                         state.volume = volume;
                     }
                 }
@@ -1251,13 +1311,13 @@ namespace FamiStudio
 
                     if (state.fdsModDepth != modDepth)
                     {
-                        var pattern = GetOrCreatePattern(channel, p).GetOrCreateNoteAt(n).FdsModDepth = (byte)modDepth;
+                        var pattern = channel.GetOrCreatePattern(p).GetOrCreateNoteAt(n).FdsModDepth = (byte)modDepth;
                         state.fdsModDepth = modDepth;
                     }
 
                     if (state.fdsModSpeed != modSpeed)
                     {
-                        var pattern = GetOrCreatePattern(channel, p).GetOrCreateNoteAt(n).FdsModSpeed = (ushort)modSpeed;
+                        var pattern = channel.GetOrCreatePattern(p).GetOrCreateNoteAt(n).FdsModSpeed = (ushort)modSpeed;
                         state.fdsModSpeed = modSpeed;
                     }
                 }
@@ -1277,10 +1337,20 @@ namespace FamiStudio
                 }
                 else if (channel.Type >= ChannelType.S5BSquare1 && channel.Type <= ChannelType.S5BSquare3)
                 {
-                    var noise = (byte)Utils.Clamp((GetState(channel.Type, NotSoFatso.STATE_YMNOISEFREQUENCY, 0) & 0x1f) / clockMultiplier[channel.Expansion], 1, 31);
-                    var mixer = (int)GetState(channel.Type, NotSoFatso.STATE_YMMIXER, 0);
+                    var mixer = (int)GetState(channel.Type, NotSoFatso.STATE_S5BMIXER, 0);
+                    var noiseFreq = (byte)Utils.Clamp((GetState(channel.Type, NotSoFatso.STATE_S5BNOISEFREQUENCY, 0) & 0x1f) / clockMultiplier[channel.Expansion], 1, 31);
+                    var envEnabled = (int)GetState(channel.Type, NotSoFatso.STATE_S5BENVENABLED, 0) != 0;
+                    var envShape = (int)GetState(channel.Type, NotSoFatso.STATE_S5BENVSHAPE, 0);
+                    var envTrigger = (int)GetState(channel.Type, NotSoFatso.STATE_S5BENVTRIGGER, 0);
                     mixer = (mixer & 0x1) + ((mixer & 0x8) >> 2);
-                    instrument = GetS5BInstrument(noise, mixer);
+                    instrument = GetS5BInstrument(noiseFreq, mixer, envEnabled, envShape);
+                    if (envEnabled)
+                    {
+                        if (envTrigger != 0)
+                            force = true;
+                        else
+                            attack = false;
+                    }
                 }
                 else if (channel.Type >= ChannelType.EPSMSquare1 && channel.Type <= ChannelType.EPSMrythm6)
                 {
@@ -1291,19 +1361,33 @@ namespace FamiStudio
                         for (int i = 0; i < 31; i++)
                             regs[i] = (byte)GetState(channel.Type, NotSoFatso.STATE_FMPATCHREG, i);
 
-                        instrument = GetEPSMInstrument(1, regs, 0, 0);
+                        instrument = GetEPSMInstrument(1, regs, 0, 0, false, 0);
                     }
                     else if (channel.Type >= ChannelType.EPSMrythm1 && channel.Type <= ChannelType.EPSMrythm6)
                     {
                         regs[1] = (byte)GetState(channel.Type, NotSoFatso.STATE_STEREO, 0);
-                        instrument = GetEPSMInstrument(2, regs, 0, 0);
+                        instrument = GetEPSMInstrument(2, regs, 0, 0, false, 0);
                     }
                     else
                     {
-                        var noise = (byte)Utils.Clamp((GetState(channel.Type, NotSoFatso.STATE_YMNOISEFREQUENCY, 0) & 0x1f) / clockMultiplier[channel.Expansion], 1, 31);
-                        var mixer = (int)GetState(channel.Type, NotSoFatso.STATE_YMMIXER, 0);
+                        var mixer = (int)GetState(channel.Type, NotSoFatso.STATE_S5BMIXER, 0);
+                        int noiseFreq;
+                        if (ym2149AsEPSM && channel.IsEPSMSquareChannel)
+                            noiseFreq = (byte)Utils.Clamp((GetState(channel.Type, NotSoFatso.STATE_S5BNOISEFREQUENCY, 0) & 0x1f) / clockMultiplier[ExpansionType.S5B], 1, 31);
+                        else
+                            noiseFreq = (byte)Utils.Clamp((GetState(channel.Type, NotSoFatso.STATE_S5BNOISEFREQUENCY, 0) & 0x1f) / clockMultiplier[channel.Expansion], 1, 31);
+                        var envEnabled = (int)GetState(channel.Type, NotSoFatso.STATE_S5BENVENABLED, 0) != 0;
+                        var envShape = (int)GetState(channel.Type, NotSoFatso.STATE_S5BENVSHAPE, 0);
+                        var envTrigger = (int)GetState(channel.Type, NotSoFatso.STATE_S5BENVTRIGGER, 0);
                         mixer = (mixer & 0x1) + ((mixer & 0x8) >> 2);
-                        instrument = GetEPSMInstrument(0, regs, noise, mixer);
+                        instrument = GetEPSMInstrument(0, regs, noiseFreq, mixer, envEnabled, envShape);
+                        if (envEnabled)
+                        {
+                            if (envTrigger != 0)
+                                force = true;
+                            else
+                                attack = false;
+                        }
                     }
 
                 }
@@ -1318,6 +1402,8 @@ namespace FamiStudio
                     period = (int)(period / clockMultiplier[channel.Expansion]);
                 if(ym2149AsEPSM && channel.IsEPSMSquareChannel)
                     period = (int)(period / clockMultiplier[ExpansionType.S5B]);
+
+                var hasNoteWithAttack = false;
 
                 if ((state.period != period) || (hasOctave && state.octave != octave) || (instrument != state.instrument) || force)
                 {
@@ -1355,7 +1441,7 @@ namespace FamiStudio
 
                     if ((state.note != note) || (state.instrument != instrument && instrument != null) || force)
                     {
-                        var pattern = GetOrCreatePattern(channel, p);
+                        var pattern = channel.GetOrCreatePattern(p);
                         var newNote = pattern.GetOrCreateNoteAt(n);
                         newNote.Value = (byte)note;
                         newNote.Instrument = instrument;
@@ -1366,6 +1452,7 @@ namespace FamiStudio
                         if (!attack)
                             newNote.HasAttack = false;
                         hasNote = note != 0;
+                        hasNoteWithAttack = newNote.IsMusical && newNote.HasAttack;
                     }
 
                     if (hasPitch && !stop)
@@ -1380,25 +1467,50 @@ namespace FamiStudio
 
                         if (pitch != state.pitch)
                         {
-                            var pattern = GetOrCreatePattern(channel, p).GetOrCreateNoteAt(n).FinePitch = pitch;
+                            var pattern = channel.GetOrCreatePattern(p).GetOrCreateNoteAt(n).FinePitch = pitch;
                             state.pitch = pitch;
                         }
                     }
 
                     state.period = period;
                 }
+
+                // Same rule applies for S5B and EPSM with manual envelope period, the only difference with FDS is that 
+                // envelope period effects apply regardless of which channel they are on.
+                if (channel.IsS5BChannel || channel.IsEPSMSquareChannel)
+                {
+                    var envFreq = (int)GetState(channel.Type, NotSoFatso.STATE_S5BENVFREQUENCY, 0);
+                    var envEnabled = (int)GetState(channel.Type, NotSoFatso.STATE_S5BENVENABLED, 0) != 0;
+
+                    // All envelope frequency will be on square 1.
+                    if (ym2149AsEPSM && channel.IsEPSMSquareChannel)
+                        envFreq = (int)(envFreq / clockMultiplier[ExpansionType.S5B]);
+                    else
+                        envFreq = (int)(envFreq / clockMultiplier[channel.Expansion]);
+
+                    // All envelope frequency will be on square 1.
+                    if (state.s5bEnvFreq != envFreq || hasNoteWithAttack && envEnabled)
+                    {
+                        var firstChannelType = channel.IsS5BChannel ? ChannelType.S5BSquare1 : ChannelType.EPSMSquare1;
+                        var firstChannel = song.GetChannelByType(firstChannelType);
+                        firstChannel.GetOrCreatePattern(p).GetOrCreateNoteAt(n).EnvelopePeriod = (ushort)envFreq;
+                        state.s5bEnvFreq = envFreq;
+                    }
+                }
             }
 
             return hasNote;
         }
 
-        public static float BcdToDecimal(IEnumerable<byte> bcd)
+        public static float BcdToDecimal(ReadOnlySpan<byte> bcd)
         {
-            Debug.Assert(bcd != null || bcd.Count() != 0);
+            Debug.Assert(bcd != null || bcd.Length != 0);
 
+            // Assume reversed.
             var result = 0;
-            foreach (byte item in bcd)
+            for (int i = bcd.Length - 1; i >= 0; i--)
             {
+                byte item = bcd[i];
                 Debug.Assert((item >> 4) < 10);
                 Debug.Assert((item % 16) < 10);
                 result *= 100;
@@ -1461,32 +1573,32 @@ namespace FamiStudio
                 channelStates[i] = new ChannelState();
 
 
-            var vgmDataOffset = BitConverter.ToInt32(vgmFile.Skip(0x34).Take(4).ToArray())+0x34;
+            var vgmDataOffset = BitConverter.ToInt32(vgmFile.AsSpan(0x34, 4))+0x34;
 #if DEBUG
-            Log.LogMessage(LogSeverity.Info, "Version : " + (BcdToDecimal(vgmFile.Skip(8).Take(4).Reverse().ToArray()) / 100).ToString("F2"));
+            Log.LogMessage(LogSeverity.Info, "Version : " + (BcdToDecimal(vgmFile.AsSpan(8, 4)) / 100).ToString("F2"));
             Log.LogMessage(LogSeverity.Info, "VGM Data Startoffset: " + vgmDataOffset);
 #endif
-            var vgmData = new byte[3];
+            var vgmData = new ReadOnlySpan<byte>();
             var vgmCommand = vgmFile[vgmDataOffset];
             if (adjustClock)
             {
-                if (BitConverter.ToInt32(vgmFile.Skip(0x74).Take(4).ToArray()) > 0)
-                    clockMultiplier[ExpansionType.S5B] = (float)BitConverter.ToInt32(vgmFile.Skip(0x74).Take(4).ToArray()) / (((vgmFile[0x78] & vgmFile[0x79] & 0x10) == 0x10) ? 1789773 : (float)894886.5);
-                if (BitConverter.ToInt32(vgmFile.Skip(0x44).Take(4).ToArray()) > 0)
-                    clockMultiplier[ExpansionType.EPSM] = (float)BitConverter.ToInt32(vgmFile.Skip(0x44).Take(4).ToArray()) / 4000000;
-                if (BitConverter.ToInt32(vgmFile.Skip(0x48).Take(4).ToArray()) > 0)
-                    clockMultiplier[ExpansionType.EPSM] = (float)BitConverter.ToInt32(vgmFile.Skip(0x48).Take(4).ToArray()) / 8000000;
-                if (BitConverter.ToInt32(vgmFile.Skip(0x4C).Take(4).ToArray()) > 0)
-                    clockMultiplier[ExpansionType.EPSM] = (float)BitConverter.ToInt32(vgmFile.Skip(0x4C).Take(4).ToArray()) / 8000000;
-                if (BitConverter.ToInt32(vgmFile.Skip(0x2c).Take(4).ToArray()) > 0)
-                    clockMultiplier[ExpansionType.EPSM] = (float)BitConverter.ToInt32(vgmFile.Skip(0x2C).Take(4).ToArray()) / 8000000;
-                if (BitConverter.ToInt32(vgmFile.Skip(0x10).Take(4).ToArray()) > 0)
-                    clockMultiplier[ExpansionType.Vrc7] = (float)BitConverter.ToInt32(vgmFile.Skip(0x10).Take(4).ToArray()) / 3579545;
+                if (BitConverter.ToInt32(vgmFile.AsSpan(0x74, 4)) > 0)
+                    clockMultiplier[ExpansionType.S5B] = (float)BitConverter.ToInt32(vgmFile.AsSpan(0x74, 4)) / (((vgmFile[0x78] & vgmFile[0x79] & 0x10) == 0x10) ? 1789773 : (float)894886.5);
+                if (BitConverter.ToInt32(vgmFile.AsSpan(0x44, 4)) > 0)
+                    clockMultiplier[ExpansionType.EPSM] = (float)BitConverter.ToInt32(vgmFile.AsSpan(0x44, 4)) / 4000000;
+                if (BitConverter.ToInt32(vgmFile.AsSpan(0x48, 4)) > 0)
+                    clockMultiplier[ExpansionType.EPSM] = (float)BitConverter.ToInt32(vgmFile.AsSpan(0x48, 4)) / 8000000;
+                if (BitConverter.ToInt32(vgmFile.AsSpan(0x4C, 4)) > 0)
+                    clockMultiplier[ExpansionType.EPSM] = (float)BitConverter.ToInt32(vgmFile.AsSpan(0x4C, 4)) / 8000000;
+                if (BitConverter.ToInt32(vgmFile.AsSpan(0x2c, 4)) > 0)
+                    clockMultiplier[ExpansionType.EPSM] = (float)BitConverter.ToInt32(vgmFile.AsSpan(0x2C, 4)) / 8000000;
+                if (BitConverter.ToInt32(vgmFile.AsSpan(0x10, 4)) > 0)
+                    clockMultiplier[ExpansionType.Vrc7] = (float)BitConverter.ToInt32(vgmFile.AsSpan(0x10, 4)) / 3579545;
 
                 if (ym2149AsEpsm)
                 {
-                    if (BitConverter.ToInt32(vgmFile.Skip(0x74).Take(4).ToArray()) > 0)
-                        clockMultiplier[ExpansionType.S5B] = (float)BitConverter.ToInt32(vgmFile.Skip(0x74).Take(4).ToArray()) / (((vgmFile[0x78] & vgmFile[0x79] & 0x10) == 0x10) ? 4000000 : 2000000);
+                    if (BitConverter.ToInt32(vgmFile.AsSpan(0x74, 4)) > 0)
+                        clockMultiplier[ExpansionType.S5B] = (float)BitConverter.ToInt32(vgmFile.AsSpan(0x74, 4)) / (((vgmFile[0x78] & vgmFile[0x79] & 0x10) == 0x10) ? 4000000 : 2000000);
                     ym2149AsEPSM = ym2149AsEpsm;
                 }
             }
@@ -1500,55 +1612,69 @@ namespace FamiStudio
                     project.SetExpansionAudioMask(expansionMask, 0);
                 if (vgmCommand == 0x67)  //DataBlock
                 {
+                    var dataSize = BitConverter.ToInt32(vgmFile.AsSpan(vgmDataOffset + 3, 4));
+                    var dataType = vgmFile[vgmDataOffset + 2];
+                    var dataAddr = BitConverter.ToUInt16(vgmFile.AsSpan(vgmDataOffset + 7, 2));
+
 #if DEBUG
-                    Log.LogMessage(LogSeverity.Info, "DataBlock Size: " + BitConverter.ToString(vgmFile.Skip(vgmDataOffset + 3).Take(4).Reverse().ToArray()).Replace("-", ""));
-                    Log.LogMessage(LogSeverity.Info, "DataBlock Type: " + BitConverter.ToString(vgmFile.Skip(vgmDataOffset + 2).Take(1).Reverse().ToArray()).Replace("-", ""));
-                    Log.LogMessage(LogSeverity.Info, "DataBlock Addr: " + BitConverter.ToString(vgmFile.Skip(vgmDataOffset + 3 + 4).Take(2).Reverse().ToArray()).Replace("-", ""));
+                    Log.LogMessage(LogSeverity.Info, $"DataBlock Size: {dataSize:x8}");
+                    Log.LogMessage(LogSeverity.Info, $"DataBlock Type: {dataType:x2}");
+                    Log.LogMessage(LogSeverity.Info, $"DataBlock Addr: {dataAddr:x4}");
 #endif
 
                     if (vgmFile.Length < (vgmDataOffset + 3 + 4))
                         break;
 
-                    if (vgmFile.Length < (BitConverter.ToInt32(vgmFile.Skip(vgmDataOffset + 3).Take(4).ToArray()) - 2))
+                    if (vgmFile.Length < dataSize - 2)
                         break;
+
                     if (vgmFile[vgmDataOffset + 2] == 0xC2) //DPCM Data
                     {
-                        var data = vgmFile.Skip(vgmDataOffset + 3 + 4 + 2).Take(BitConverter.ToInt32(vgmFile.Skip(vgmDataOffset + 3).Take(4).ToArray()) - 2).ToArray();
+                        var data = vgmFile.AsSpan(vgmDataOffset + 9, dataSize - 2);
                         for (int i = 0; i < data.Length; i++)
                         {
-                            dpcmData[i + BitConverter.ToUInt16(vgmFile.Skip(vgmDataOffset + 3 + 4).Take(2).ToArray()) - 0xc000] = data[i];
+                            if ((i + dataAddr - 0xc000) >= 0)
+                                dpcmData[i + dataAddr - 0xc000] = data[i];
                         }
-
                     }
                     else if (vgmFile[vgmDataOffset + 2] == 0x07) //PCM RAM Data
                     {
-                        pcmRAMData = vgmFile.Skip(vgmDataOffset + 3 + 4 + 2).Take(BitConverter.ToInt32(vgmFile.Skip(vgmDataOffset + 3).Take(4).ToArray()) - 2).ToArray();
+                        pcmRAMData = vgmFile.AsSpan(vgmDataOffset + 9, dataSize - 2).ToArray();
                     }
                     else
-                        dpcmData = vgmFile.Skip(vgmDataOffset + 3 + 4 + 2).Take(BitConverter.ToInt32(vgmFile.Skip(vgmDataOffset + 3).Take(4).ToArray()) - 2).ToArray();
-                    vgmDataOffset = vgmDataOffset + BitConverter.ToInt32(vgmFile.Skip(vgmDataOffset + 3).Take(4).ToArray()) + 3 + 4;
+                    {
+                        dpcmData = vgmFile.AsSpan(vgmDataOffset + 9, dataSize - 2).ToArray();
+                    }
+                    vgmDataOffset = vgmDataOffset + dataSize + 7;
                 }
                 else if (vgmCommand == 0x68)  //PCM Data Copy
                 {
-                    if (vgmFile.Length < (vgmDataOffset + 3 + 3 + 3 + 3))
+                    if (vgmFile.Length < (vgmDataOffset + 12))
                         break;
-                    var readOffset = vgmFile.Skip(vgmDataOffset + 3).Take(3).ToArray();
-                    var writeOffset = vgmFile.Skip(vgmDataOffset + 3 + 3).Take(3).ToArray();
-                    var copySize = vgmFile.Skip(vgmDataOffset + 3 + 3 + 3).Take(3).ToArray();
+
+                    var readOffset  = Utils.Bytes24BitToInt(vgmFile.AsSpan(vgmDataOffset + 3, 3));
+                    var writeOffset = Utils.Bytes24BitToInt(vgmFile.AsSpan(vgmDataOffset + 6, 3));
+                    var copySize    = Utils.Bytes24BitToInt(vgmFile.AsSpan(vgmDataOffset + 9, 3));
+
 #if DEBUG
-                    Log.LogMessage(LogSeverity.Info, "PCM RAM Copy Read Offset: " + BitConverter.ToString(readOffset.Reverse().ToArray()).Replace("-", ""));
-                    Log.LogMessage(LogSeverity.Info, "PCM RAM Copy Write Offset: " + BitConverter.ToString(writeOffset.Reverse().ToArray()).Replace("-", ""));
-                    Log.LogMessage(LogSeverity.Info, "PCM RAM Copy: " + BitConverter.ToString(vgmFile.Skip(vgmDataOffset + 2).Take(1).Reverse().ToArray()).Replace("-", ""));
-                    Log.LogMessage(LogSeverity.Info, "PCM RAM COPY Size: " + BitConverter.ToString(copySize));
+                    Log.LogMessage(LogSeverity.Info, $"PCM RAM Copy Read Offset: {readOffset:x6}");
+                    Log.LogMessage(LogSeverity.Info, $"PCM RAM Copy Write Offset: {writeOffset:x6}");
+                    Log.LogMessage(LogSeverity.Info, $"PCM RAM Copy: {vgmFile[vgmDataOffset + 2]:x2}");
+                    Log.LogMessage(LogSeverity.Info, $"PCM RAM COPY Size: {copySize:x6}");
 #endif
-                    if (vgmFile.Length < (Utils.Bytes24BitToInt(copySize) + vgmDataOffset))
+
+                    if (vgmFile.Length < (copySize + vgmDataOffset))
                         break;
+
                     if (vgmFile[vgmDataOffset + 2] == 0x07)
                     {
-                        var data = pcmRAMData.Skip(Utils.Bytes24BitToInt(readOffset)).Take(Utils.Bytes24BitToInt(copySize)).ToArray();
+                        // PERKKA/ALEX TODO : There is ia OOB access here with some files. Either a bug in the way we export
+                        // data or some miscalculation when we import.
+                        copySize = Math.Min(copySize, pcmRAMData.Length - readOffset);
+                        var data = pcmRAMData.AsSpan(readOffset, copySize).ToArray();
                         for (int i = 0; i < data.Length; i++)
                         {
-                            dpcmData[i + Utils.Bytes24BitToInt(writeOffset) - 0xc000] = data[i];
+                            dpcmData[i + writeOffset - 0xc000] = data[i];
                         }
 
                     }
@@ -1578,7 +1704,7 @@ namespace FamiStudio
                     {
                         if (vgmFile.Length < (vgmDataOffset + 3))
                             break;
-                        samples = samples + BitConverter.ToInt16(vgmFile.Skip(vgmDataOffset + 1).Take(2).ToArray());
+                        samples = samples + BitConverter.ToInt16(vgmFile.AsSpan(vgmDataOffset + 1, 2));
                         vgmDataOffset = vgmDataOffset + 3;
                     }
                     else if (vgmCommand >= 0x80)
@@ -1621,7 +1747,8 @@ namespace FamiStudio
                 {
                     if (vgmFile.Length < (vgmDataOffset + 3))
                         break;
-                    vgmData = vgmFile.Skip(vgmDataOffset).Take(3).ToArray();
+
+                    vgmData = vgmFile.AsSpan(vgmDataOffset, 3);
                     if (vgmCommand == 0xB4)
                     {
 
@@ -1655,11 +1782,18 @@ namespace FamiStudio
                     }
                     else if (vgmCommand == 0x56 || vgmCommand == 0x52 || vgmCommand == 0x58 || vgmCommand == 0x55)
                     {
-                        if(vgmData[1] == 0x10)
+                        if (vgmData[1] == 0x10)
                             epsmRegisterLo[vgmData[1]] = epsmRegisterLo[vgmData[1]] | vgmData[2];
+                        else if (vgmData[1] == 0x0D)
+                        {
+                            epsmEnvTrigger[0] = 1;
+                            epsmEnvTrigger[1] = 1;
+                            epsmEnvTrigger[2] = 1;
+                            epsmRegisterLo[vgmData[1]] = vgmData[2];
+                        }
                         else if (vgmData[1] == 0x28)
                         {
-                            int channel = ((((vgmData[2] & 4) >> 2) + 1) * ((vgmData[2] & 3)+1)) -1;
+                            int channel = ((((vgmData[2] & 4) >> 2) + 1) * ((vgmData[2] & 3) + 1)) - 1;
                             if ((vgmData[2] & 0x7) == 0)
                             {
                                 if ((vgmData[2] & 0xf0) > 0 && epsmFmEnabled[0] == 0)
@@ -1757,11 +1891,23 @@ namespace FamiStudio
                     {
                         if (ym2149AsEpsm)
                         {
+                            if (vgmData[1] == 0x0D)
+                            {
+                                epsmEnvTrigger[0] = 1;
+                                epsmEnvTrigger[1] = 1;
+                                epsmEnvTrigger[2] = 1;
+                            }
                             epsmRegisterLo[vgmData[1]] = vgmData[2];
                             expansionMask = expansionMask | ExpansionType.EPSMMask;
                         }
                         else
                         {
+                            if (vgmData[1] == 0x0D)
+                            {
+                                s5bEnvTrigger[0] = 1;
+                                s5bEnvTrigger[1] = 1;
+                                s5bEnvTrigger[2] = 1;
+                            }
                             s5bRegister[vgmData[1]] = vgmData[2];
                             expansionMask = expansionMask | ExpansionType.S5BMask;
                         }
@@ -1769,7 +1915,7 @@ namespace FamiStudio
                     else
                     {
                         if(unknownChipCommands < 100)
-                        Log.LogMessage(LogSeverity.Info, "Unknown VGM Chip Data: " + BitConverter.ToString(vgmData.ToArray()).Replace("-", "") + " offset: " + vgmDataOffset + " command " + vgmCommand);
+                            Log.LogMessage(LogSeverity.Info, "Unknown VGM Chip Data: " + BitConverter.ToString(vgmData.ToArray()).Replace("-", "") + " offset: " + vgmDataOffset + " command " + vgmCommand);
                         unknownChipCommands++;
                     }
                     chipCommands++;
@@ -1794,10 +1940,10 @@ namespace FamiStudio
 
             if (vgmFile.Length > (vgmDataOffset + 4))
             {
-                if (vgmFile.Skip(vgmDataOffset).Take(4).SequenceEqual(Encoding.ASCII.GetBytes("Gd3 ")))
+                if (vgmFile.AsSpan(vgmDataOffset, 4).SequenceEqual(Encoding.ASCII.GetBytes("Gd3 ")))
                 {
                     vgmDataOffset = vgmDataOffset + 4 + 4 + 4; // "Gd3 " + version + gd3 length data
-                    var gd3Data = vgmFile.Skip(vgmDataOffset).Take(vgmFile.Length - vgmDataOffset).ToArray();
+                    var gd3Data = vgmFile.AsSpan(vgmDataOffset, vgmFile.Length - vgmDataOffset);
                     var gd3DataArray = System.Text.Encoding.Unicode.GetString(gd3Data).Split("\0");
 #if DEBUG
                     Log.LogMessage(LogSeverity.Info, "Gd3 Data: " + System.Text.Encoding.Unicode.GetString(gd3Data));
@@ -1823,9 +1969,31 @@ namespace FamiStudio
             for (int c = 0; c < song.Channels.Length; c++)
             {
                 if (channelStates[c].state != ChannelState.Stopped)
-                GetOrCreatePattern(song.Channels[c], p).GetOrCreateNoteAt(n).IsStop = true;
+                    song.Channels[c].GetOrCreatePattern(p).GetOrCreateNoteAt(n).IsStop = true;
             }
             song.Name = songName;
+            var factors = Utils.GetFactors(song.PatternLength, FamiStudioTempoUtils.MaxNoteLength);
+            if (factors.Length > 0)
+            {
+                var noteLen = factors[0];
+
+                // Look for a factor that generates a note length < 10 and gives a pattern length that is a multiple of 16.
+                foreach (var factor in factors)
+                {
+                    if (factor <= 10)
+                    {
+                        noteLen = factor;
+                        if (((song.PatternLength / noteLen) % 16) == 0)
+                            break;
+                    }
+                }
+
+                song.ChangeFamiStudioTempoGroove(new[] { noteLen }, false);
+            }
+            else
+            {
+                song.ChangeFamiStudioTempoGroove(new[] { 1 }, false);
+            }
             song.SetSensibleBeatLength();
             song.ConvertToCompoundNotes();
             song.DeleteEmptyPatterns();

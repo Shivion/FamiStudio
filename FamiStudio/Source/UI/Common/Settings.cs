@@ -5,22 +5,24 @@ using System.Linq;
 using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
+using static System.Collections.Specialized.BitVector32;
 
 namespace FamiStudio
 {
     static class Settings
     {
         // Version in case we need to do deprecation.
-        // Version 0-1 : Any FamiStudio < 3.0.0
-        // Version 2   : FamiStudio 3.0.0
-        // Version 3   : FamiStudio 3.1.0
-        // Version 4   : FamiStudio 3.2.0
-        // Version 5   : FamiStudio 3.2.3 (Added snapping tutorial)
-        // Version 6   : FamiStudio 3.3.0
-        // Version 7   : FamiStudio 4.0.0 (Animated GIF tutorials, control changes, recent files, dialogs)
-        // Version 8   : FamiStudio 4.1.0 (Configurable keys)
-        public const int SettingsVersion = 8;
-        public const int NumRecentFiles = 10;
+        // Version 0-1  : Any FamiStudio < 3.0.0
+        // Version 2    : FamiStudio 3.0.0
+        // Version 3    : FamiStudio 3.1.0
+        // Version 4    : FamiStudio 3.2.0
+        // Version 5    : FamiStudio 3.2.3 (Added snapping tutorial)
+        // Version 6    : FamiStudio 3.3.0
+        // Version 7    : FamiStudio 4.0.0 (Animated GIF tutorials, control changes, recent files, dialogs)
+        // Version 8    : FamiStudio 4.1.0 (Configurable keys)
+        // Version 9-10 : FamiStudio 4.2.0 (Latency improvements, more filtering options)
+        public const int SettingsVersion = 10;
+        public const int NumRecentFiles  = 10;
 
         // Constants for follow.
         public const int FollowModeJump       = 0;
@@ -54,6 +56,7 @@ namespace FamiStudio
         public static bool AutoSaveCopy = true;
         public static string PatternNamePrefix = "Pattern ";
         public static int PatternNameNumDigits = 1;
+        public static int NewVersionCounter = 3;
         public static string LastProjectFile;
 
         // User Interface section
@@ -190,43 +193,28 @@ namespace FamiStudio
         public static Shortcut[] DisplayChannelShortcuts;
 
         // Audio section
-        const int DefaultNumBufferedAudioFrames = Platform.IsLinux ? 4 : Platform.IsAndroid ? 2 : 3;
-        public static int NumBufferedAudioFrames = DefaultNumBufferedAudioFrames;
+        const int DefaultNumBufferedFrames = 2;
+        const int DefaultAudioBufferSize = Platform.IsLinux ? 60 : 30;
+        const int EmulationThreadCpuScoreThreshold = 100;
+
+        public static string AudioAPI = "";
+        public static int AudioBufferSize = DefaultAudioBufferSize;
+        public static int NumBufferedFrames = DefaultNumBufferedFrames;
         public static int InstrumentStopTime = 1;
         public static bool SquareSmoothVibrato = true;
         public static bool N163Mix = true;
         public static bool ClampPeriods = true;
+        public static bool AccurateSeek = false;
         public static bool NoDragSoungWhenPlaying = false;
         public static int MetronomeVolume = 50;
         public static int SeparateChannelsExportTndMode = NesApu.TND_MODE_SINGLE;
 
         // Mixer section
-        public static float GlobalVolume = -2.0f; // in dB
-
-        public struct ExpansionMix
-        {
-            public ExpansionMix(float v, float t)
-            {
-                volume = v;
-                treble = t;
-            }
-
-            public float volume; // in dB
-            public float treble; // in dB
-        }
-
-        public static ExpansionMix[] ExpansionMixerSettings        = new ExpansionMix[ExpansionType.Count];
-        public static ExpansionMix[] DefaultExpansionMixerSettings = new ExpansionMix[ExpansionType.Count]
-        {
-            new ExpansionMix(0.0f,  -5.0f), // None
-            new ExpansionMix(0.0f,  -5.0f), // Vrc6
-            new ExpansionMix(0.0f, -15.0f), // Vrc7
-            new ExpansionMix(0.0f, -15.0f), // Fds
-            new ExpansionMix(0.0f,  -5.0f), // Mmc5
-            new ExpansionMix(0.0f, -15.0f), // N163
-            new ExpansionMix(0.0f,  -5.0f), // S5B
-            new ExpansionMix(0.0f,  -5.0f)  // EPSM
-        };
+        public const float DefaultGlobalVolumeDb = -2.0f;
+        public const int DefaultBassCutoffHz = 16;
+        public static float GlobalVolumeDb = DefaultGlobalVolumeDb; // in dB
+        public static int BassCutoffHz = DefaultBassCutoffHz; // in Hz
+        public static ExpansionMixer[] ExpansionMixerSettings = new ExpansionMixer[ExpansionType.Count];
 
         // MIDI section
         public static string MidiDevice = "";
@@ -246,6 +234,7 @@ namespace FamiStudio
         // Mobile section
         public static bool AllowVibration = true;
         public static bool ForceLandscape = false;
+        public static int  MobilePianoHeight = 25;
 
         // Piano roll stuff
         public static int SnapResolution = SnapResolutionType.OneBeat;
@@ -431,7 +420,12 @@ namespace FamiStudio
             AutoSaveCopy = ini.GetBool("General", "AutoSaveCopy", true);
             PatternNamePrefix = ini.GetString("General", "PatternNamePrefix", "Pattern ");
             PatternNameNumDigits = ini.GetInt("General", "PatternNameNumDigits", 1);
+            NewVersionCounter = ini.GetInt("General", "NewVersionCounter", 3);
             LastProjectFile = OpenLastProjectOnStart ? ini.GetString("General", "LastProjectFile", "") : "";
+
+            // Reset new version counter if last version the user used isnt this one.
+            if (ini.GetString("General", "LastFamiStudioVersion", "0.0.0.0") != Platform.ApplicationVersion)
+                NewVersionCounter = 3;
 
             // UI
             DpiScaling = ini.GetInt("UI", "DpiScaling", 0);
@@ -461,14 +455,37 @@ namespace FamiStudio
             }
 
             // Audio
-            NumBufferedAudioFrames = ini.GetInt("Audio", "NumBufferedFrames", DefaultNumBufferedAudioFrames);
+            var audioAPIs = Platform.GetAvailableAudioAPIs();
+            AudioAPI = ini.GetString("Audio", "AudioAPI", audioAPIs[0]);
+            AudioBufferSize = ini.GetInt("Audio", "AudioBufferSize", DefaultAudioBufferSize);
+            NumBufferedFrames = ini.GetInt("Audio", "NumBufferedFrames", DefaultNumBufferedFrames);
             InstrumentStopTime = ini.GetInt("Audio", "InstrumentStopTime", 2);
             SquareSmoothVibrato = ini.GetBool("Audio", "SquareSmoothVibrato", true);
             N163Mix = ini.GetBool("Audio", "N163Mix", true);
             ClampPeriods = ini.GetBool("Audio", "ClampPeriods", true);
+            AccurateSeek = ini.GetBool("Audio", "AccurateSeek", false);
             NoDragSoungWhenPlaying = ini.GetBool("Audio", "NoDragSoungWhenPlaying", false);
             MetronomeVolume = ini.GetInt("Audio", "MetronomeVolume", 50);
             SeparateChannelsExportTndMode = ini.GetInt("Audio", "SeparateChannelsExportTndMode", NesApu.TND_MODE_SINGLE);
+
+            if (!audioAPIs.Contains(AudioAPI))
+            {
+                AudioAPI = audioAPIs[0];
+            }
+
+            // Latency changes, reset to default.
+            if (Version < 10)
+            {
+                // Only enable "NumBufferedFrames" on very crappy mobile devices. Even very old PCs can emulate
+                // a frame of EPSM in 1-3ms. Older phones will need to run emulation threads, thankfully most of
+                // these have  4 to 8 cores. For reference, my Pixel 6a (score 176) emulates EPSM in 6-9ms. 
+                if (Platform.IsMobile && Utils.BenchmarkCPU() < EmulationThreadCpuScoreThreshold)
+                    NumBufferedFrames = 2;
+                else
+                    NumBufferedFrames = 0;
+
+                AudioBufferSize = DefaultAudioBufferSize;
+            }
 
             // MIDI
             MidiDevice = ini.GetString("MIDI", "Device", "");
@@ -491,15 +508,22 @@ namespace FamiStudio
             FFmpegExecutablePath = ini.GetString("FFmpeg", "ExecutablePath", "");
 
             // Mixer.
-            GlobalVolume = ini.GetFloat("Mixer", "GlobalVolume", -3.0f);
+            GlobalVolumeDb = ini.GetFloat("Mixer", "GlobalVolume", -3.0f);
+            BassCutoffHz = ini.GetInt("Mixer", "BassCutoffHz", 16);
 
-            Array.Copy(DefaultExpansionMixerSettings, ExpansionMixerSettings, ExpansionMixerSettings.Length);
+            Array.Copy(ExpansionMixer.DefaultExpansionMixerSettings, ExpansionMixerSettings, ExpansionMixerSettings.Length);
 
-            for (int i = 0; i < ExpansionType.Count; i++)
-            {
-                var section = "Mixer" + ExpansionType.InternalNames[i];
-                ExpansionMixerSettings[i].volume = ini.GetFloat(section, "Volume", DefaultExpansionMixerSettings[i].volume);
-                ExpansionMixerSettings[i].treble = ini.GetFloat(section, "Treble", DefaultExpansionMixerSettings[i].treble);
+            // At Version 9 (FamiStudio 4.2.0) we added more filtering options.
+            if (Version >= 9)
+            { 
+                for (int i = 0; i < ExpansionType.Count; i++)
+                {
+                    var section = "Mixer" + ExpansionType.InternalNames[i];
+
+                    ExpansionMixerSettings[i].VolumeDb        = ini.GetFloat(section, "VolumeDb",      ExpansionMixer.DefaultExpansionMixerSettings[i].VolumeDb);
+                    ExpansionMixerSettings[i].TrebleDb        = ini.GetFloat(section, "TrebleDb",      ExpansionMixer.DefaultExpansionMixerSettings[i].TrebleDb);
+                    ExpansionMixerSettings[i].TrebleRolloffHz = ini.GetInt(section, "TrebleRolloffHz", ExpansionMixer.DefaultExpansionMixerSettings[i].TrebleRolloffHz);
+                }
             }
 
             // At version 7 (FamiStudio 4.1.0) we allowed configuring all the keys.
@@ -555,7 +579,7 @@ namespace FamiStudio
             }
 
             // Clamp to something reasonable.
-            NumBufferedAudioFrames = Utils.Clamp(NumBufferedAudioFrames, 2, 16);
+            NumBufferedFrames = Utils.Clamp(NumBufferedFrames, 0, 16);
 
             // Linux or Mac is more likely to have standard path for ffmpeg.
             if (Platform.IsLinux || Platform.IsMacOS)
@@ -574,6 +598,7 @@ namespace FamiStudio
             // Mobile section
             AllowVibration = ini.GetBool("Mobile", "AllowVibration", true);
             ForceLandscape = ini.GetBool("Mobile", "ForceLandscape", false);
+            MobilePianoHeight = ini.GetInt("Mobile", "MobilePianoHeight", 25);
 
             // Piano roll section
             SnapResolution = Utils.Clamp(ini.GetInt("PianoRoll", "SnapResolution", SnapResolutionType.OneBeat), SnapResolutionType.Min, SnapResolutionType.Max);
@@ -629,7 +654,9 @@ namespace FamiStudio
             ini.SetString("General", "LastProjectFile", OpenLastProjectOnStart ? LastProjectFile : "");
             ini.SetString("General", "PatternNamePrefix", PatternNamePrefix);
             ini.SetInt("General", "PatternNameNumDigits", PatternNameNumDigits);
+            ini.SetInt("General", "NewVersionCounter", NewVersionCounter);
             ini.SetBool("General", "AutoSaveCopy", AutoSaveCopy);
+            ini.SetString("General", "LastFamiStudioVersion", Platform.ApplicationVersion);
 
             // UI
             ini.SetInt("UI", "DpiScaling", DpiScaling);
@@ -655,23 +682,28 @@ namespace FamiStudio
             ini.SetBool("Input", "AltZoomAllowed", AltZoomAllowed);
 
             // Audio
-            ini.SetInt("Audio", "NumBufferedFrames", NumBufferedAudioFrames);
+            ini.SetString("Audio", "AudioAPI", AudioAPI);
+            ini.SetInt("Audio", "AudioBufferSize", AudioBufferSize);
+            ini.SetInt("Audio", "NumBufferedFrames", NumBufferedFrames);
             ini.SetInt("Audio", "InstrumentStopTime", InstrumentStopTime);
             ini.SetBool("Audio", "SquareSmoothVibrato", SquareSmoothVibrato);
             ini.SetBool("Audio", "N163Mix", N163Mix);
             ini.SetBool("Audio", "ClampPeriods", ClampPeriods);
+            ini.SetBool("Audio", "AccurateSeek", AccurateSeek);
             ini.SetBool("Audio", "NoDragSoungWhenPlaying", NoDragSoungWhenPlaying);
             ini.SetInt("Audio", "MetronomeVolume", MetronomeVolume);
             ini.SetInt("Audio", "SeparateChannelsExportTndMode", SeparateChannelsExportTndMode);
 
             // Mixer
-            ini.SetFloat("Mixer", "GlobalVolume", GlobalVolume);
+            ini.SetFloat("Mixer", "GlobalVolume", GlobalVolumeDb);
+            ini.SetInt("Mixer", "BassCutoffHz", BassCutoffHz);
 
             for (int i = 0; i < ExpansionType.Count; i++)
             {
                 var section = "Mixer" + ExpansionType.InternalNames[i];
-                ini.SetFloat(section, "Volume", ExpansionMixerSettings[i].volume);
-                ini.SetFloat(section, "Treble", ExpansionMixerSettings[i].treble);
+                ini.SetFloat(section, "VolumeDb", ExpansionMixerSettings[i].VolumeDb);
+                ini.SetFloat(section, "TrebleDb", ExpansionMixerSettings[i].TrebleDb);
+                ini.SetFloat(section, "TrebleRolloffHz", ExpansionMixerSettings[i].TrebleRolloffHz);
             }
 
             // MIDI
@@ -701,6 +733,7 @@ namespace FamiStudio
             // Mobile
             ini.SetBool("Mobile", "AllowVibration", AllowVibration);
             ini.SetBool("Mobile", "ForceLandscape", ForceLandscape);
+            ini.SetInt("Mobile", "MobilePianoHeight", MobilePianoHeight);
 
             // Piano roll section
             ini.SetInt("PianoRoll", "SnapResolution", SnapResolution);
